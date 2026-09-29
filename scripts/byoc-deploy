@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Deploy this repo to the ArangoDB Container Manager (BYOC) with the shared
+# arango-byoc-deploy tool: https://github.com/ArthurKeen/arango-byoc-deploy
+# Settings live in arango-byoc.toml at the repo root. Needs `uv` on PATH.
+#
+#   scripts/byoc-deploy list | preflight | update | verify | rollback --to X | delete
+#
+# Pinned to an exact commit until the tool is published on PyPI; bump REV
+# deliberately (and re-run `verify`) rather than floating on a branch.
+set -euo pipefail
+REV="0006881506ce079af15170ee6c81e211596bca81"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if ! command -v uvx >/dev/null 2>&1; then
+    echo "error: uvx not found — install uv (https://docs.astral.sh/uv/)" >&2
+    exit 1
+fi
+exec uvx --from "git+https://github.com/ArthurKeen/arango-byoc-deploy@${REV}" \
+    arango-byoc-deploy --repo "${REPO_ROOT}" "$@"

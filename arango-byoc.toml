@@ -1,0 +1,52 @@
+# BYOC deployment settings for the shared arango-byoc-deploy tool
+# (https://github.com/ArthurKeen/arango-byoc-deploy). Run: scripts/byoc-deploy <command>
+
+app-name     = "agentic-graph-analytics"
+instance     = "aga"
+display-name = "Agentic Graph Analytics"
+description  = "Transform business requirements into actionable graph analytics insights with AI-powered automation."
+base-image   = "py12base"    # this cluster offers no py13base
+database     = ""            # a _global mount: the service spans databases
+
+tarball        = "aga-service.tar.gz"
+# The single source of truth for the release (NFR-20).
+version-source = { file = "graph_analytics_ai/__init__.py", regex = '^__version__\s*=\s*["\x27]([^"\x27]+)["\x27]' }
+version-probe  = { path = "/healthz", json-key = "version" }
+
+required-members = [
+  "entrypoint", "requirements.txt", "graph_analytics_ai/product/byoc_app.py",
+  "static/index.html", "static/workspace/index.html",
+]
+# A Next.js export: basePath bakes the mount prefix into absolute asset URLs,
+# which pre-flight accepts only when they are under this deploy's mount.
+index-html = "static/workspace/index.html"
+asset-page = "workspace/"
+
+# The platform injects nothing but PORT: without a baked .env every route
+# answers 500 and the UI silently shows demo data.
+require-baked-env = true
+required-env-keys = ["ARANGO_ENDPOINT", "ARANGO_USER", "ARANGO_PASSWORD"]
+prefix-env-var    = "SERVICE_URL_PATH_PREFIX"
+
+# scripts/platform/package.sh bakes the LLM keys on purpose: the platform
+# passes the container nothing but PORT, and the agentic features need them.
+# That makes the tarball a credential (package.sh warns too); pre-flight names
+# each baked key on every run and still refuses any key not listed here.
+allow-baked-secrets = ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"]
+
+[[env-rules]]
+key    = "ARANGO_DATABASE"
+equals = "aga_workspace"
+reason = "the product API needs its own metadata database, not the analytics graph"
+
+# The pod must actually reach its database, not merely answer.
+[[probes]]
+path            = "/healthz"
+label           = "database reachable"
+expect-json-key = "database.reachable"
+min-items       = 1
+
+[[probes]]
+path    = "/api/workspaces"
+label   = "workspaces"
+timeout = 90

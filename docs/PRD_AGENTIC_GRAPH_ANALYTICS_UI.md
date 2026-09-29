@@ -1488,9 +1488,10 @@ older requirement, this section wins.
   bundle whose baked prefix does not equal the mount path the deploy will use,
   rather than relying on a post-deploy check to notice.
   *(Implemented: `frontend/next.config.mjs` makes `SERVICE_URL_PATH_PREFIX`
-  drive `basePath` and `assetPrefix`; `scripts/byoc_deploy.py` pre-flight
-  refuses a bundle whose baked prefix or asset prefix disagrees with the target
-  mount path — a bundle built for one instance would otherwise load a
+  drive `basePath` and `assetPrefix`; the deploy pre-flight (`scripts/byoc-deploy`,
+  the shared `arango-byoc-deploy` tool configured in `arango-byoc.toml`) refuses
+  a bundle whose baked prefix disagrees with the target mount path, or whose
+  exported assets resolve outside it — a bundle built for one instance would otherwise load a
   neighbouring service's assets rather than 404 honestly.)*
 - **NFR-22 (Fail to start, not to serve):** A deployed instance that cannot
   reach its configuration MUST refuse to start, naming what is missing, rather
@@ -1509,10 +1510,10 @@ older requirement, this section wins.
   reported as *unverified*, distinctly from both success and failure, rather
   than being skipped or misreported.
   *(Implemented: `scripts/platform/entrypoint` exits when `ARANGO_ENDPOINT` or
-  `ARANGO_PASSWORD` is absent; `scripts/byoc_deploy.py` fails verification when
-  the live `/healthz` version does not match the release. Rollback derives the
-  expected release from the `<release>-<build>` package version via
-  `release_of`, and reports a pre-NFR-20 target with exit code 2 rather than 0
+  `ARANGO_PASSWORD` is absent; the deploy tool (`scripts/byoc-deploy`) fails
+  verification when the live `/healthz` version does not match the release.
+  Rollback derives the expected release from the `<release>-<build>` package
+  version (the tool's `release_of`), and reports a pre-NFR-20 target with exit code 2 rather than 0
   or 1 — it previously skipped the version check for every target, and a
   legacy target was misreported as FAILED because the verifier parsed its 404
   page as `/healthz`. Motivated by the previously deployed instance, which
