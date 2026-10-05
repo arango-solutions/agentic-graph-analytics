@@ -280,6 +280,27 @@ class Platform:
         raise DeployError(f"timed out after {timeout_s:.0f}s; last status: {last}")
 
 
+#: Exit code for a deploy that completed but whose build cannot be proven.
+#: Distinct from 1 (failed) so a script can tell "did not work" from
+#: "worked, but I cannot show you which code is running".
+EXIT_UNVERIFIED = 2
+
+
+def release_of(package_version: str) -> str | None:
+    """``3.0.0-4`` -> ``3.0.0``; ``None`` for a build that predates NFR-20.
+
+    Packages uploaded since NFR-20 are named ``<release>-<build>``, and the
+    running service reports ``<release>`` from ``/healthz``, so the two can be
+    compared. Earlier packages carry a plain version (``0.5.2``) and were built
+    before ``/healthz`` existed — they report a hardcoded ``0.1.0`` from
+    ``/openapi.json`` and nothing else — so no check can confirm which of them
+    is live. Returning ``None`` makes that explicit instead of guessing.
+    """
+
+    head, sep, tail = package_version.rpartition("-")
+    return head if sep and head and tail.isdigit() else None
+
+
 def next_build_version(platform: Platform, name: str, release: str) -> str:
     """``<release>-<n>``: the platform keys packages on (name, version) and
     refuses to overwrite, so every upload needs a fresh suffix."""
@@ -521,6 +542,13 @@ def cmd_verify(args: argparse.Namespace) -> int:
             response = platform.get(url)
             code = response.status_code
             if code == 200:
+                if getattr(args, "legacy_target", False):
+                    # deep_verify would call /healthz, get the old bundle's 404
+                    # page, fail to parse it, and report a working rollback as
+                    # FAILED. Say exactly what is known instead.
+                    print("    serving 200 — build identity cannot be proven")
+                    print("    => UNVERIFIED (legacy build)")
+                    return EXIT_UNVERIFIED
                 return (
                     0
                     if deep_verify(platform, url, getattr(args, "expect_version", None))
@@ -616,7 +644,17 @@ def cmd_rollback(args: argparse.Namespace) -> int:
     print(
         "==> ROLLBACK to an already-uploaded package (code only; the database is untouched)"
     )
-    args.expect_version = None
+    # NFR-22: a rollback is a deploy, so it must prove which build is live.
+    # This used to set expect_version = None for every target, which let a
+    # rollback to a modern build pass without checking its version at all.
+    args.expect_version = release_of(args.to)
+    args.legacy_target = args.expect_version is None
+    if args.legacy_target:
+        print(
+            f"    NOTE: v{args.to} predates NFR-20 — it has no /healthz and reports a "
+            f"hardcoded version, so this rollback can be confirmed to SERVE but not "
+            f"proven to be v{args.to}. It will be reported UNVERIFIED."
+        )
     return _swap(platform, args, db_name, args.to)
 
 
