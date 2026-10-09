@@ -44,6 +44,11 @@ from typing import Any, Callable, Dict, List, Optional
 from ..ai.agents.constants import WorkflowSteps
 from ..ai.agents.orchestrator import WorkflowCancelled
 from ..ai.tracing import TraceEvent, TraceEventType
+from .profile_connection import (
+    STARTED_BY_KEY,
+    is_platform_login,
+    open_as_platform_user,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -820,6 +825,20 @@ class AgenticRunSupervisor:
                 f"Connection profile {connection_profile.connection_profile_id} "
                 "missing 'password' secret ref"
             )
+
+        if is_platform_login(password_ref):
+            # NFR-24: the run acts as the person who started it, on a token
+            # minted for them; there is no request (and no forwarded login)
+            # by the time it executes.
+            started_by = (run.metadata or {}).get(STARTED_BY_KEY)
+            if not started_by:
+                raise RuntimeError(
+                    f"Workflow run {run.run_id} uses the platform login of "
+                    f"connection profile {connection_profile.connection_profile_id}, "
+                    "but was started without a signed-in platform user; start it "
+                    "again from the workspace UI"
+                )
+            return open_as_platform_user(connection_profile.database, started_by)
 
         if self._secret_resolver is None:
             raise RuntimeError(
