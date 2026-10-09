@@ -35,6 +35,7 @@ from ..ai.schema.extractor import SchemaExtractor
 from ..ai.schema.models import GraphSchema
 from ..config import parse_ssl_verify
 from ..db_connection import connect_arango_database
+from ..platform_auth import platform_endpoint
 from .constants import (
     AUDIT_EVENTS_COLLECTION,
     ANALYSIS_EXECUTIONS_COLLECTION,
@@ -48,7 +49,21 @@ from .constants import (
     REQUIREMENT_VERSIONS_COLLECTION,
     WORKFLOW_RUNS_COLLECTION,
 )
-from .exceptions import ConflictError, DuplicateError, ValidationError
+from .exceptions import (
+    ConflictError,
+    DuplicateError,
+    LoginRequiredError,
+    ValidationError,
+)
+from .profile_connection import (
+    STARTED_BY_KEY,
+    ProfileDatabase,
+    acting_user,
+    is_platform_login,
+    open_as_platform_user,
+    open_profile_database,
+    platform_login_ref,
+)
 from .models import (
     AnalysisEpoch,
     AnalysisExecution,
@@ -1594,6 +1609,10 @@ class ProductService:
         run = self.repository.get_workflow_run(run_id)
         run.status = WorkflowRunStatus.RUNNING
         run.started_at = run.started_at or current_timestamp()
+        platform_user = acting_user()
+        if platform_user:
+            # NFR-24: a background run acts as the person who started it.
+            run.metadata = {**(run.metadata or {}), STARTED_BY_KEY: platform_user}
         self.repository.update_workflow_run(run)
 
         dispatched = False
@@ -1618,6 +1637,7 @@ class ProductService:
                     "workflow_mode": run.workflow_mode.value,
                     "dispatched_to_supervisor": dispatched,
                     "executor_kind": execution_meta.get("executor_kind"),
+                    "platform_user": platform_user,
                 },
             )
         )
@@ -3677,13 +3697,47 @@ class ProductService:
         else:
             deployment_mode = ""
 
-        return {
+        defaults = {
             "endpoint": endpoint,
             "username": username,
             "database": database,
             "verify_ssl": verify_ssl,
             "deployment_mode": deployment_mode,
             "password_secret_env_var": "ARANGO_PASSWORD",
+            "login": "password",
+        }
+        if platform_endpoint() is not None:
+            # NFR-24: on the platform a profile can use the signed-in user's
+            # own login instead of a password; offer that first.
+            defaults["login"] = "platform"
+            defaults["username"] = acting_user() or ""
+            defaults["secret_ref"] = platform_login_ref()
+        return defaults
+
+    def _list_platform_user_databases(
+        self, defaults: Dict[str, Any], include_system: bool
+    ) -> Dict[str, Any]:
+        """The databases the signed-in platform user can use (NFR-24), for the
+        zero-config connect flow: no endpoint, user or password to type."""
+
+        user = acting_user()
+        system_db = open_as_platform_user("_system", user, check_access=False)
+        try:
+            names = list(system_db.databases_accessible_to_user() or [])
+        except Exception as exc:  # pragma: no cover - depends on driver/cluster
+            raise ValidationError(
+                f"Failed to list the databases {user!r} can use: {exc}"
+            ) from exc
+        if not include_system:
+            names = [name for name in names if not name.startswith("_")]
+        return {
+            "endpoint": defaults.get("endpoint") or platform_endpoint(),
+            "databases": sorted(names),
+            "username": user,
+            "verify_ssl": True,
+            "deployment_mode": defaults.get("deployment_mode") or "",
+            "login": "platform",
+            "secret_ref": platform_login_ref(),
         }
 
     def list_default_cluster_databases(
@@ -3711,6 +3765,8 @@ class ProductService:
 
         defaults = self.get_connection_defaults()
         endpoint = (defaults.get("endpoint") or "").strip()
+        if defaults.get("login") == "platform":
+            return self._list_platform_user_databases(defaults, include_system)
         if not endpoint:
             raise ValidationError(
                 "This deployment has no ARANGO_ENDPOINT configured; "
@@ -3748,18 +3804,27 @@ class ProductService:
                 f"Connection profile is missing secret ref: {password_secret_key}"
             )
 
-        password = self.secret_resolver.resolve(password_ref)
+        platform_login = is_platform_login(password_ref)
+        password = (
+            None if platform_login else self.secret_resolver.resolve(password_ref)
+        )
         verified_at = current_timestamp()
 
         try:
-            self.db_connector(
-                endpoint=profile.endpoint,
-                username=profile.username,
-                password=password,
-                database=profile.database,
-                verify_ssl=profile.verify_ssl,
-                verify_system=verify_system,
-            )
+            if platform_login:
+                open_as_platform_user(profile.database, acting_user())
+            else:
+                self.db_connector(
+                    endpoint=profile.endpoint,
+                    username=profile.username,
+                    password=password,
+                    database=profile.database,
+                    verify_ssl=profile.verify_ssl,
+                    verify_system=verify_system,
+                )
+        except LoginRequiredError:
+            # Not a property of the profile: the request had no login.
+            raise
         except Exception as exc:
             profile.last_verified_at = verified_at
             profile.last_verification_status = ConnectionVerificationStatus.FAILED
@@ -3825,21 +3890,7 @@ class ProductService:
         """Enumerate named graphs available on a connection profile."""
 
         profile = self.repository.get_connection_profile(connection_profile_id)
-        password_ref = profile.secret_refs.get(password_secret_key)
-        if not password_ref:
-            raise ValidationError(
-                f"Connection profile is missing secret ref: {password_secret_key}"
-            )
-
-        password = self.secret_resolver.resolve(password_ref)
-        db = self.db_connector(
-            endpoint=profile.endpoint,
-            username=profile.username,
-            password=password,
-            database=profile.database,
-            verify_ssl=profile.verify_ssl,
-            verify_system=verify_system,
-        )
+        db = self._open_profile(profile, password_secret_key, verify_system).db
 
         try:
             raw_graphs = list(db.graphs() or [])
@@ -3935,21 +3986,7 @@ class ProductService:
         """
 
         profile = self.repository.get_connection_profile(connection_profile_id)
-        password_ref = profile.secret_refs.get(password_secret_key)
-        if not password_ref:
-            raise ValidationError(
-                f"Connection profile is missing secret ref: {password_secret_key}"
-            )
-
-        password = self.secret_resolver.resolve(password_ref)
-        db = self.db_connector(
-            endpoint=profile.endpoint,
-            username=profile.username,
-            password=password,
-            database=profile.database,
-            verify_ssl=profile.verify_ssl,
-            verify_system=verify_system,
-        )
+        db = self._open_profile(profile, password_secret_key, verify_system).db
         extractor = self.schema_extractor_factory(
             db,
             sample_size=sample_size,
@@ -4483,21 +4520,7 @@ class ProductService:
             graph_profile.connection_profile_id
         )
 
-        password_ref = connection.secret_refs.get(password_secret_key)
-        if not password_ref:
-            raise ValidationError(
-                f"Connection profile is missing secret ref: {password_secret_key}"
-            )
-        password = self.secret_resolver.resolve(password_ref)
-
-        db = self.db_connector(
-            endpoint=connection.endpoint,
-            username=connection.username,
-            password=password,
-            database=connection.database,
-            verify_ssl=connection.verify_ssl,
-            verify_system=verify_system,
-        )
+        db = self._open_profile(connection, password_secret_key, verify_system).db
         cache = WorkspaceSchemaCache(self.repository, connection.workspace_id)
         report: SchemaChangeReport = describe_schema_change(
             db, graph_name=graph_profile.graph_name, cache=cache
@@ -5103,25 +5126,30 @@ class ProductService:
             )
         return links
 
+    def _open_profile(
+        self,
+        profile: ConnectionProfile,
+        password_secret_key: str = "password",
+        verify_system: bool = True,
+    ) -> ProfileDatabase:
+        """Open *profile*'s database: with its password, or as the signed-in
+        platform user for a platform-login profile (NFR-24)."""
+
+        return open_profile_database(
+            profile,
+            secret_resolver=self.secret_resolver,
+            db_connector=self.db_connector,
+            secret_key=password_secret_key,
+            verify_system=verify_system,
+        )
+
     def _connect_for_connection_profile(
         self, connection_profile_id: str, password_secret_key: str = "password"
     ):
         """Open a database handle for a connection profile."""
 
         profile = self.repository.get_connection_profile(connection_profile_id)
-        password_ref = profile.secret_refs.get(password_secret_key)
-        if not password_ref:
-            raise ValidationError(
-                f"Connection profile is missing secret ref: {password_secret_key}"
-            )
-        return self.db_connector(
-            endpoint=profile.endpoint,
-            username=profile.username,
-            password=self.secret_resolver.resolve(password_ref),
-            database=profile.database,
-            verify_ssl=profile.verify_ssl,
-            verify_system=False,
-        )
+        return self._open_profile(profile, password_secret_key, verify_system=False).db
 
     @staticmethod
     def _sample_edge_endpoints(db, edge_collection: str, sample_size: int):

@@ -5,134 +5,20 @@ a token the integration sidecar mints, renewed before it expires, so no
 password is baked. One real HTTP server on localhost plays the sidecar
 (``/_integration/authn/v1/*``) and the coordinator (``/_api/version`` and the
 database's ``/_api/database/current``); database handles are real
-python-arango objects.
+python-arango objects (``tests/platform_fake.py``).
 """
 
-import base64
 import json
-import threading
-import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
 import pytest
 
 from graph_analytics_ai import db_connection, platform_auth
 
-PLATFORM_ENV = (
-    "ARANGO_DEPLOYMENT_ENDPOINT",
-    "ARANGO_DEPLOYMENT_CA",
-    "INTEGRATION_HTTP_ADDRESS_FULL",
-    "INTEGRATION_HTTP_ADDRESS",
-    "AGA_PLATFORM_AUTH",
-    "AGA_SERVICE_USER",
-    "AGA_SIDECAR_TOKEN_LIFETIME_S",
-    "AGA_PLATFORM_CA_BUNDLE",
-    "AGA_PLATFORM_VERIFY_TLS",
-)
+from .platform_fake import FORWARDED, PLATFORM_ENV, FakePlatform
+from .platform_fake import make_jwt as _jwt
+
 PEM = "-----BEGIN CERTIFICATE-----\nMIIBfake\n-----END CERTIFICATE-----"
-
-
-def _jwt(**claims) -> str:
-    def enc(data):
-        return base64.urlsafe_b64encode(json.dumps(data).encode()).rstrip(b"=").decode()
-
-    return f"{enc({'alg': 'HS256'})}.{enc(claims)}.sig"
-
-
-FORWARDED = _jwt(
-    iss="arangodb",
-    preferred_username="alice",
-    exp=int(time.time()) + 3600,
-    iat=int(time.time()),
-)
-
-
-class FakePlatform:
-    """Sidecar + coordinator. Tokens it accepts: the forwarded login, and
-    whatever it minted. ``expire_after`` makes minted tokens short-lived."""
-
-    def __init__(self):
-        self.users = {FORWARDED: "alice"}
-        self.minted = []
-        self.fail_create = False
-        self.expire_after = 3600
-        self.seen_tokens = []
-        fake = self
-
-        class Handler(BaseHTTPRequestHandler):
-            def log_message(self, *args):
-                pass
-
-            def _send(self, status, body):
-                data = json.dumps(body).encode()
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
-
-            def _caller(self):
-                auth = self.headers.get("Authorization", "")
-                token = auth[7:] if auth.lower().startswith("bearer ") else None
-                if token:
-                    fake.seen_tokens.append(token)
-                return fake.users.get(token)
-
-            def do_GET(self):
-                user = self._caller()
-                if self.path == "/_integration/authn/v1/identity":
-                    self._send(200, {"user": user}) if user else self._send(401, {})
-                elif self.path == "/_api/version" or self.path.endswith(
-                    "/_api/database/current"
-                ):
-                    if user:
-                        self._send(
-                            200,
-                            {
-                                "error": False,
-                                "code": 200,
-                                "result": {"name": "aga_workspace", "version": "3.12"},
-                            },
-                        )
-                    else:
-                        self._send(
-                            401,
-                            {
-                                "error": True,
-                                "code": 401,
-                                "errorNum": 11,
-                                "errorMessage": "not authorized",
-                            },
-                        )
-                else:
-                    self._send(404, {})
-
-            def do_POST(self):
-                if self.path != "/_integration/authn/v1/createToken":
-                    self._send(404, {})
-                    return
-                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-                fake.minted.append(body)
-                if fake.fail_create:
-                    self._send(500, {})
-                    return
-                token = _jwt(
-                    iss="arangodb",
-                    preferred_username=body["user"],
-                    exp=int(time.time()) + fake.expire_after,
-                    n=len(fake.minted),
-                )
-                fake.users[token] = body["user"]
-                self._send(200, {"token": token})
-
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.address = f"http://127.0.0.1:{self.server.server_address[1]}"
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
-
-    def close(self):
-        self.server.shutdown()
-        self.server.server_close()
 
 
 @pytest.fixture(autouse=True)

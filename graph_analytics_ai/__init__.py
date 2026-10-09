@@ -12,7 +12,7 @@ Key Features:
 - Comprehensive error handling and retry logic
 """
 
-__version__ = "3.0.0"
+__version__ = "3.1.0"
 
 from .config import (
     get_arango_config,

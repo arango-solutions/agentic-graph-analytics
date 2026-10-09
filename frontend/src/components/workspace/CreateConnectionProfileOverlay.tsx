@@ -54,7 +54,8 @@ export function CreateConnectionProfileOverlay({
     database: "",
     username: "",
     verifySsl: true,
-    passwordSecretEnvVar: ""
+    passwordSecretEnvVar: "",
+    login: "password"
   });
   const [prefilled, setPrefilled] = useState(false);
   // "detecting" until we know whether this deployment can connect on its own.
@@ -141,7 +142,10 @@ export function CreateConnectionProfileOverlay({
           username: result.username || current.username,
           verifySsl: result.verifySsl,
           deploymentMode: result.deploymentMode || current.deploymentMode,
-          database: result.databases[0] ?? ""
+          database: result.databases[0] ?? "",
+          // NFR-24: on the platform the profile stores no secret; whoever
+          // uses it acts as themselves.
+          login: result.login
         }));
       })
       .catch(() => {
@@ -268,7 +272,24 @@ export function CreateConnectionProfileOverlay({
           <p className="muted">Checking this deployment&apos;s cluster…</p>
         ) : null}
 
-        {connectMode === "default-cluster" && defaultCluster ? (
+        {connectMode === "default-cluster" &&
+        defaultCluster &&
+        defaultCluster.login === "platform" ? (
+          <>
+            <p className="muted">
+              Signed in as <code>{defaultCluster.username}</code> with your
+              platform login. Pick one of the databases you have access to.
+            </p>
+            <p className="muted">
+              The profile stores no password: everyone who uses it works with
+              their own platform login and permissions.
+            </p>
+          </>
+        ) : null}
+
+        {connectMode === "default-cluster" &&
+        defaultCluster &&
+        defaultCluster.login !== "platform" ? (
           <>
             <p className="muted">
               Connected to <code>{defaultCluster.endpoint}</code> as{" "}
@@ -394,6 +415,12 @@ export function CreateConnectionProfileOverlay({
                 ))}
               </select>
             </label>
+          ) : form.login === "platform" ? (
+            <p className="muted">
+              Your platform account has access to no databases yet. Ask an
+              administrator to grant you access to the database you want to
+              analyse.
+            </p>
           ) : (
             <p className="muted">
               No databases visible to these credentials. Check the endpoint and
@@ -415,6 +442,8 @@ export function CreateConnectionProfileOverlay({
                 setHasSearched(false);
                 setDatabases([]);
                 updateField("database", "");
+                // Another cluster has no platform login: back to a password.
+                updateField("login", "password");
               }}
             >
               Connect to a different cluster…

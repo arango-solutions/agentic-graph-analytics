@@ -519,6 +519,12 @@ export interface ConnectionProfileSummary {
   metadata: Record<string, unknown>;
 }
 
+/** How a connection profile logs in (NFR-24). "password" resolves the
+ * env-var named by `passwordSecretEnvVar` on the server; "platform" stores no
+ * secret at all — on the Arango platform whoever uses the profile acts as
+ * themselves, with their own permissions. */
+export type ConnectionLogin = "password" | "platform";
+
 export interface CreateConnectionProfileInput {
   name: string;
   deploymentMode: string;
@@ -527,6 +533,7 @@ export interface CreateConnectionProfileInput {
   username: string;
   verifySsl: boolean;
   passwordSecretEnvVar?: string;
+  login?: ConnectionLogin;
 }
 
 /** Two-step connect, part 1: cluster-level credentials used to enumerate
@@ -569,6 +576,7 @@ export interface DefaultClusterDatabasesResult {
   username: string;
   verifySsl: boolean;
   deploymentMode: string;
+  login: ConnectionLogin;
 }
 
 export interface ClusterDatabasesResult {
@@ -586,6 +594,7 @@ export interface ConnectionDefaults {
   verifySsl: boolean;
   deploymentMode: string;
   passwordSecretEnvVar: string;
+  login: ConnectionLogin;
 }
 
 export interface ConnectionVerificationResult {
