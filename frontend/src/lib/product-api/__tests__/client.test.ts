@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  connectionSecretRefs,
   createProductAPIClient,
+  mapConnectionLogin,
   mapReportBundle,
   mapWorkflowDAGView,
   mapWorkspaceHealth,
@@ -123,7 +125,8 @@ describe("product API client mappers", () => {
       databases: ["alpha", "beta"],
       username: "svc-account",
       verifySsl: false,
-      deploymentMode: "self_managed"
+      deploymentMode: "self_managed",
+      login: "password"
     });
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe(
@@ -132,6 +135,60 @@ describe("product API client mappers", () => {
     // The payload must stay empty — sending credentials from the browser is
     // the thing this endpoint exists to avoid.
     expect(JSON.parse(init.body)).toEqual({});
+  });
+
+  it("reports the platform login for default-cluster databases on the platform", async () => {
+    // NFR-24: on the Arango platform the server lists the databases the
+    // signed-in user can use, and says the profile should use their login.
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        endpoint: "https://platform.example",
+        databases: ["sales"],
+        username: "alice",
+        verify_ssl: true,
+        deployment_mode: "",
+        login: "platform",
+        secret_ref: { kind: "platform_login" }
+      })
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await createProductAPIClient(
+      "http://api.example"
+    ).listDefaultClusterDatabases();
+
+    expect(result.login).toBe("platform");
+    expect(result.username).toBe("alice");
+    vi.unstubAllGlobals();
+  });
+
+  it("treats an unknown or missing login kind as the password path", () => {
+    expect(mapConnectionLogin(undefined)).toBe("password");
+    expect(mapConnectionLogin("kerberos")).toBe("password");
+    expect(mapConnectionLogin("platform")).toBe("platform");
+  });
+
+  it("stores no secret reference for a platform-login profile", () => {
+    const base = {
+      name: "sales",
+      deploymentMode: "",
+      endpoint: "https://platform.example",
+      database: "sales",
+      username: "alice",
+      verifySsl: true
+    };
+    expect(
+      connectionSecretRefs({
+        ...base,
+        login: "platform",
+        passwordSecretEnvVar: "ARANGO_PASSWORD"
+      })
+    ).toEqual({ password: { kind: "platform_login" } });
+    expect(
+      connectionSecretRefs({ ...base, passwordSecretEnvVar: " ARANGO_PASSWORD " })
+    ).toEqual({ password: { kind: "env", ref: "ARANGO_PASSWORD" } });
+    expect(connectionSecretRefs({ ...base, login: "password" })).toEqual({});
   });
 
   it("maps workspace overview payloads into UI assets", () => {

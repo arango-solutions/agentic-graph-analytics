@@ -1,7 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { createProductAPIClient, workspaceAssetsFromOverview } from "@/lib/product-api/client";
+import {
+  connectionSecretRefs,
+  createProductAPIClient,
+  workspaceAssetsFromOverview
+} from "@/lib/product-api/client";
 import {
   demoAssets,
   demoConnectionProfile,
@@ -806,7 +810,8 @@ export function useWorkspaceData({
       database: "",
       verifySsl: true,
       deploymentMode: "",
-      passwordSecretEnvVar: "ARANGO_PASSWORD"
+      passwordSecretEnvVar: "ARANGO_PASSWORD",
+      login: "password"
     };
   }, [isLive, apiClient]);
 
@@ -1557,9 +1562,7 @@ function statefulDemoCreateConnectionProfile(
     database: input.database,
     username: input.username,
     verifySsl: input.verifySsl,
-    secretRefs: input.passwordSecretEnvVar
-      ? { password: { kind: "env", ref: input.passwordSecretEnvVar } }
-      : {},
+    secretRefs: connectionSecretRefs(input),
     lastVerificationStatus: "unknown",
     lastVerifiedAt: null,
     metadata: { source: "demo" }
