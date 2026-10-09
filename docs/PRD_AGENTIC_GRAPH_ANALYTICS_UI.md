@@ -1598,6 +1598,29 @@ older requirement, this section wins.
   Right-click opens object actions." This rule supersedes the reasoning in the
   FR-1 and FR-13 notes, which cite a right-click menu as evidence those
   requirements are met — they are PARTIAL until the gaps above close.)*
+- **NFR-24 (Platform login, no baked password):** On the Arango platform the
+  gateway forwards each signed-in user's login and the platform injects the
+  cluster endpoint (`ARANGO_DEPLOYMENT_ENDPOINT`), its CA
+  (`ARANGO_DEPLOYMENT_CA`) and an integration sidecar that can mint tokens.
+  A deployed instance MUST use these instead of a password baked into the
+  bundle: (a) the workspace store (`aga_workspace`) is reached as a dedicated,
+  database-scoped service account (`AGA_SERVICE_USER`, default `aga-service`)
+  on a sidecar-minted token, renewed before it expires and once more on a
+  401; (b) a person's own graphs are read as that person; (c) a background run
+  acts as the person who started it; (d) GAE jobs use that person's token.
+  TLS to the injected endpoint MUST be verified against the injected CA. A
+  token MUST never be minted without a named user, because the sidecar
+  defaults to `root`. `GET /platform/diagnostics` reports what the platform
+  provides and how the workspace logged in, and MUST never return a token or
+  claim value.
+  *(PARTIAL — (a) done: `graph_analytics_ai/platform_auth.py`
+  (`SidecarTokenSource`, `open_renewing_database`),
+  `graph_analytics_ai/db_connection.py:144` (`_platform_workspace_connection`,
+  tried first by `get_db_connection`, with the password as a reported
+  fallback), `graph_analytics_ai/product/fastapi_app.py:158`; verified live on
+  prod.demo as v3.0.0-2. (b)–(d) not yet done: connection profiles, run
+  execution and GAE still resolve a password, so NFR-22's entrypoint check for
+  `ARANGO_PASSWORD` stays until they are.)*
 
 ---
 
