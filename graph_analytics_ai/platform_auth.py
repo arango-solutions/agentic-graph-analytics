@@ -16,6 +16,12 @@ renewed before it expires (:class:`SidecarTokenSource`,
 :func:`open_renewing_database`). A token is never minted without a named user:
 the sidecar would default to root.
 
+A person's own graphs are read as that person. Each API request records who
+is signed in (:class:`PlatformCaller`, named by the sidecar from the forwarded
+login), and :func:`open_user_database` opens a database as that user on a
+token minted for them. A background run names the user who started it, so it
+can do the same long after the request that started it has gone.
+
 Adapted from arango-cypher-py's ``arango_cypher/service/platform_auth.py`` and
 arango-embedding-loader's ``backend/app/auth.py``.
 """
@@ -30,6 +36,8 @@ import os
 import tempfile
 import threading
 import time
+from contextvars import Context, ContextVar, copy_context
+from dataclasses import dataclass
 from typing import Any, Optional, Union
 
 import requests
@@ -378,3 +386,97 @@ def token_facts(token: str) -> dict:
         ),
         "expires_in_s": round(exp - time.time()) if isinstance(exp, numeric) else None,
     }
+
+
+# --- the signed-in caller, per request -----------------------------------------
+
+
+@dataclass(frozen=True)
+class PlatformCaller:
+    """Who is signed in for this request, as the sidecar named them. Holds no
+    token: a database handle for them gets one minted (:func:`open_user_database`)."""
+
+    user: str
+
+
+_caller: ContextVar[Optional[PlatformCaller]] = ContextVar(
+    "aga_platform_caller", default=None
+)
+
+
+def current_caller() -> Optional[PlatformCaller]:
+    """The signed-in platform user of the request being served, if any."""
+    return _caller.get()
+
+
+def identify_caller(authorization: Optional[str]) -> Optional[PlatformCaller]:
+    """The caller behind an ``Authorization`` header, or ``None`` off the
+    platform, without a login, or when the sidecar does not recognise it."""
+    if platform_endpoint() is None:
+        return None
+    token = forwarded_token(authorization)
+    if not token:
+        return None
+    user = sidecar_identity(token)
+    return PlatformCaller(user) if user else None
+
+
+def context_for(caller: Optional[PlatformCaller]) -> Context:
+    """A copy of the current context in which :func:`current_caller` is
+    *caller*. Run work in it with ``context.run(fn, ...)``: an executor thread
+    does not inherit the caller's context on its own."""
+    context = copy_context()
+    context.run(_caller.set, caller)
+    return context
+
+
+# --- databases opened as a named user --------------------------------------------
+
+_user_lock = threading.Lock()
+_user_sources: dict[str, SidecarTokenSource] = {}
+_user_databases: dict[tuple[str, str, str], Any] = {}
+_MAX_USERS = 1000
+
+
+def user_token_source(user: str) -> SidecarTokenSource:
+    """The (shared, renewing) token source for *user*."""
+    if not user:
+        raise SidecarError("refusing to mint a token without a user")
+    with _user_lock:
+        source = _user_sources.get(user)
+        if source is None:
+            if len(_user_sources) >= _MAX_USERS:
+                _user_sources.clear()
+                _user_databases.clear()
+            source = _user_sources[user] = SidecarTokenSource(user)
+        return source
+
+
+def open_user_database(
+    database: str, user: str, request_timeout: Optional[float] = None
+) -> Any:
+    """A handle on *database* that acts as *user* (that user's permissions,
+    nothing more), on the injected endpoint with TLS verified against the
+    injected CA. Mints the user's first token if they have none yet; handles
+    are cached per user and database."""
+    endpoint = platform_endpoint()
+    if endpoint is None:
+        raise SidecarError(
+            "platform login is not available here (no ARANGO_DEPLOYMENT_ENDPOINT, "
+            f"or {PLATFORM_AUTH_ENV}=off)"
+        )
+    source = user_token_source(user)
+    key = (endpoint, user, database)
+    with _user_lock:
+        handle = _user_databases.get(key)
+    if handle is not None:
+        return handle
+    handle = open_renewing_database(
+        endpoint,
+        database,
+        source,
+        verify=platform_tls_verify(),
+        request_timeout=request_timeout,
+    )
+    with _user_lock:
+        return _user_databases.setdefault(key, handle)

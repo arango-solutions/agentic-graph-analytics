@@ -7,6 +7,7 @@ import os
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
+from ..platform_auth import context_for, identify_caller
 from .api import PRODUCT_API_ENDPOINTS, ProductAPIDispatcher, ProductAPIEndpoint
 from .factory import create_product_service
 
@@ -83,8 +84,10 @@ def create_product_fastapi_app(
         ) from exc
 
     from .exceptions import (
+        AccessDeniedError,
         ConflictError,
         DuplicateError,
+        LoginRequiredError,
         NotFoundError,
         ValidationError,
     )
@@ -220,6 +223,8 @@ def create_product_fastapi_app(
     app.add_exception_handler(NotFoundError, _make_handler(404))
     app.add_exception_handler(ConflictError, _make_handler(409))
     app.add_exception_handler(DuplicateError, _make_handler(409))
+    app.add_exception_handler(LoginRequiredError, _make_handler(401))
+    app.add_exception_handler(AccessDeniedError, _make_handler(403))
 
     dispatcher = ProductAPIDispatcher(product_service)
 
@@ -240,6 +245,21 @@ def _resolve_enable_supervisor(explicit: Optional[bool]) -> bool:
         return bool(explicit)
     raw = os.getenv("AGA_ENABLE_AGENTIC_SUPERVISOR", "").strip().lower()
     return raw in {"1", "true", "yes", "on"}
+
+
+def _dispatch_as_caller(
+    dispatcher: ProductAPIDispatcher, authorization: Optional[str], **request: Any
+) -> Any:
+    """Dispatch one request as its signed-in platform user (NFR-24).
+
+    On the platform the sidecar names the user behind the forwarded login, so
+    connection profiles that use the platform login act as them. This runs in
+    the executor thread: naming the user may call the sidecar, which must not
+    block the event loop, and the thread does not inherit the coroutine's
+    context anyway, so the dispatch runs inside a copy carrying the caller.
+    """
+    caller = identify_caller(authorization)
+    return context_for(caller).run(dispatcher.dispatch, **request)
 
 
 def _make_route_handler(
@@ -275,7 +295,9 @@ def _make_route_handler(
         result = await loop.run_in_executor(
             None,
             functools.partial(
-                dispatcher.dispatch,
+                _dispatch_as_caller,
+                dispatcher,
+                request.headers.get("authorization"),
                 method=endpoint.method,
                 path=endpoint.path,
                 path_params=dict(request.path_params),

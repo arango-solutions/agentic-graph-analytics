@@ -29,3 +29,14 @@ class ConflictError(ProductError):
     transitions and a UI-driven write would race with the
     ``StepStatusReporter``. The FastAPI adapter maps this to HTTP 409.
     """
+
+
+class LoginRequiredError(ProductError):
+    """Raised when an operation needs the signed-in platform user and the
+    request carries no usable login (NFR-24). The FastAPI adapter maps this
+    to HTTP 401."""
+
+
+class AccessDeniedError(ProductError):
+    """Raised when the signed-in platform user may not use a database
+    (NFR-24). The FastAPI adapter maps this to HTTP 403."""

@@ -72,12 +72,25 @@ class FakeFastAPI:
         self.exception_handlers[exc_type] = handler
 
 
+class _FakeHeaders(dict):
+    """Like Starlette's ``Headers``: a mapping with case-insensitive keys."""
+
+    def __init__(self, values=None):
+        super().__init__({k.lower(): v for k, v in (values or {}).items()})
+
+    def get(self, key, default=None):
+        return super().get(key.lower(), default)
+
+
 class FakeRequest:
-    def __init__(self, method, path_params=None, query_params=None, body=None):
+    def __init__(
+        self, method, path_params=None, query_params=None, body=None, headers=None
+    ):
         self.method = method
         self.path_params = path_params or {}
         self.query_params = query_params or {}
         self.body = body or {}
+        self.headers = _FakeHeaders(headers)
 
     async def json(self):
         return self.body
@@ -191,6 +204,47 @@ def test_product_fastapi_route_dispatches_request(fake_fastapi_module):
     response = asyncio.run(route["endpoint"](request))
 
     assert response == {"workspace_id": "workspace-1", "recent_limit": "3"}
+
+
+def test_product_fastapi_route_dispatches_as_the_signed_in_platform_user(
+    fake_fastapi_module, monkeypatch
+):
+    """NFR-24: the service sees who is signed in, although it runs in an
+    executor thread, and only for that request."""
+
+    from graph_analytics_ai import platform_auth
+    from graph_analytics_ai.product import fastapi_app
+
+    seen_headers = []
+
+    def identify(authorization):
+        seen_headers.append(authorization)
+        return platform_auth.PlatformCaller("alice") if authorization else None
+
+    monkeypatch.setattr(fastapi_app, "identify_caller", identify)
+
+    class Service:
+        def get_workspace_overview(self, workspace_id, recent_limit=10):
+            caller = platform_auth.current_caller()
+            return {"user": caller.user if caller else None}
+
+    app = create_product_fastapi_app(service=Service())
+    route = next(
+        route
+        for route in app.routes
+        if route["path"] == "/api/workspaces/{workspace_id}/overview"
+    )
+    signed_in = FakeRequest(
+        method="GET",
+        path_params={"workspace_id": "w"},
+        headers={"Authorization": "bearer token"},
+    )
+    anonymous = FakeRequest(method="GET", path_params={"workspace_id": "w"})
+
+    assert asyncio.run(route["endpoint"](signed_in)) == {"user": "alice"}
+    assert asyncio.run(route["endpoint"](anonymous)) == {"user": None}
+    assert seen_headers == ["bearer token", None]
+    assert platform_auth.current_caller() is None
 
 
 def test_create_product_fastapi_app_wires_supervisor_when_explicitly_enabled(
@@ -310,20 +364,24 @@ def test_create_product_fastapi_app_registers_domain_exception_handlers(
     """ConflictError → 409 (FR-31a AC#8) + the rest of the contract mapping."""
 
     from graph_analytics_ai.product.exceptions import (
+        AccessDeniedError,
         ConflictError,
         DuplicateError,
+        LoginRequiredError,
         NotFoundError,
         ValidationError,
     )
 
     app = create_product_fastapi_app(service=object())
 
-    # All four product domain exceptions must have a handler registered.
+    # Every product domain exception must have a handler registered.
     expected = {
         ValidationError: 400,
         NotFoundError: 404,
         ConflictError: 409,
         DuplicateError: 409,
+        LoginRequiredError: 401,  # NFR-24: no usable platform login
+        AccessDeniedError: 403,  # NFR-24: the platform user lacks access
     }
     for exc_type, status_code in expected.items():
         assert exc_type in app.exception_handlers, (
