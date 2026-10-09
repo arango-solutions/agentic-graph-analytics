@@ -4,6 +4,7 @@ ArangoDB Connection Helper
 Provides a unified interface to connect to ArangoDB clusters.
 """
 
+import logging
 import os
 
 from arango import ArangoClient
@@ -15,6 +16,12 @@ from .config import get_arango_config, parse_ssl_verify
 # (a full agentic run against a multi-million-node graph can make queries
 # that exceed a minute). Overridable via ARANGO_TIMEOUT.
 DEFAULT_ARANGO_REQUEST_TIMEOUT = 300
+
+logger = logging.getLogger(__name__)
+
+#: How the workspace store connected, for ``GET /platform/diagnostics``.
+#: ``mode`` is "service account via sidecar" or "password"; never a secret.
+WORKSPACE_LOGIN: dict = {"mode": "not connected"}
 
 
 def _resolve_request_timeout(request_timeout=None):
@@ -134,9 +141,68 @@ def connect_arango_database(
     return db
 
 
+def _platform_workspace_connection():
+    """The workspace store as the service account, on a sidecar-minted token.
+
+    On the Arango platform (injected endpoint and integration sidecar) the
+    workspace's own records are reached as ``AGA_SERVICE_USER`` (default
+    ``aga-service``), whose token the sidecar mints and the connection renews,
+    so no password is needed. ``None`` off the platform, or when that fails
+    (then the configured password is used, as before, and the failure is
+    reported by ``GET /platform/diagnostics``).
+    """
+    from .platform_auth import (
+        SidecarTokenSource,
+        open_renewing_database,
+        platform_endpoint,
+        platform_tls_verify,
+        service_user,
+        sidecar_address,
+    )
+
+    endpoint = platform_endpoint()
+    if endpoint is None or sidecar_address() is None:
+        return None
+    database = os.getenv("ARANGO_DATABASE", "").strip() or "aga_workspace"
+    user = service_user()
+    try:
+        db = open_renewing_database(
+            endpoint,
+            database,
+            SidecarTokenSource(user),
+            verify=platform_tls_verify(),
+            request_timeout=_resolve_request_timeout(),
+        )
+        db.properties()  # the token works and the account can open the database
+    except Exception as exc:  # noqa: BLE001 — reported, then the password path runs
+        WORKSPACE_LOGIN.clear()
+        WORKSPACE_LOGIN.update(
+            mode="password (service account failed)",
+            user=user,
+            database=database,
+            error=f"{type(exc).__name__}: {str(exc)[:200]}",
+        )
+        logger.warning(
+            "Workspace login as %s via the sidecar failed: %s",
+            user,
+            WORKSPACE_LOGIN["error"],
+        )
+        return None
+    WORKSPACE_LOGIN.clear()
+    WORKSPACE_LOGIN.update(
+        mode="service account via sidecar", user=user, database=database
+    )
+    logger.info("Workspace store connected as %s on a sidecar-minted token", user)
+    return db
+
+
 def get_db_connection():
     """
     Establish connection to ArangoDB cluster.
+
+    On the Arango platform the workspace store is reached as a service account
+    on a sidecar-minted token (see :func:`_platform_workspace_connection`);
+    otherwise, or when that fails, with the configured password.
 
     Returns:
         StandardDatabase: ArangoDB database connection
@@ -145,6 +211,10 @@ def get_db_connection():
         ValueError: If required credentials are missing
         ConnectionError: If connection fails
     """
+    platform_db = _platform_workspace_connection()
+    if platform_db is not None:
+        return platform_db
+
     # Get configuration from environment
     config = get_arango_config()
 
@@ -154,13 +224,17 @@ def get_db_connection():
     database = config["database"]
     verify_ssl = parse_ssl_verify(config["verify_ssl"])
 
-    return connect_arango_database(
+    db = connect_arango_database(
         endpoint=endpoint,
         username=username,
         password=password,
         database=database,
         verify_ssl=verify_ssl,
     )
+    if WORKSPACE_LOGIN.get("mode") != "password (service account failed)":
+        WORKSPACE_LOGIN.clear()
+        WORKSPACE_LOGIN.update(mode="password", user=username, database=database)
+    return db
 
 
 def get_connection_info():

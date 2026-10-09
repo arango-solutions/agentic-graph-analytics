@@ -155,6 +155,43 @@ def create_product_fastapi_app(
             database["error"] = f"{type(exc).__name__}: {exc}"[:200]
         return {"status": "ok", "version": app_version, "database": database}
 
+    @app.get("/platform/diagnostics", tags=["ops"])
+    def platform_diagnostics(request: Request) -> Dict[str, Any]:
+        """What the Arango platform provides this container, and whether each
+        piece works: the injected endpoint and CA, how the workspace store
+        logged in (service account via the sidecar, or a password), the
+        forwarded login, and whether the sidecar names the caller. Never a
+        token or a claim value. In a browser, sign in to the platform at
+        ``/ui/`` first.
+        """
+        from graph_analytics_ai import platform_auth as pa
+        from graph_analytics_ai.db_connection import WORKSPACE_LOGIN
+
+        endpoint = pa.platform_endpoint()
+        verify = pa.platform_tls_verify()
+        token = pa.forwarded_token(request.headers.get("authorization"))
+        report: Dict[str, Any] = {
+            "endpoint": {
+                "injected": bool(os.getenv(pa.DEPLOYMENT_ENDPOINT_ENV, "").strip()),
+                "in_use": endpoint is not None,
+            },
+            "tls": {
+                "ca_injected": bool(os.getenv(pa.DEPLOYMENT_CA_ENV, "").strip()),
+                "ca_usable": pa.deployment_ca() is not None,
+                "policy": pa.describe_tls_verify(verify),
+            },
+            "workspace_login": dict(WORKSPACE_LOGIN),
+            "forwarded_login": pa.token_facts(token) if token else None,
+            "sidecar": {"address_injected": pa.sidecar_address() is not None},
+        }
+        if endpoint and token:
+            report["tls"]["direct_request"] = pa.endpoint_answer(
+                endpoint, token, verify
+            )
+        if token and pa.sidecar_address():
+            report["sidecar"]["identity_found"] = pa.sidecar_identity(token) is not None
+        return report
+
     allowed_origins = _resolve_cors_origins(cors_origins)
     app.add_middleware(
         CORSMiddleware,

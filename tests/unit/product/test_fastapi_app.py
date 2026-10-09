@@ -149,7 +149,9 @@ def test_create_product_fastapi_app_registers_contract_routes(fake_fastapi_modul
     # separately rather than folded into the contract, so a genuinely
     # unexpected route still fails this test.
     assert ("GET", "/healthz") in route_keys
-    assert route_keys - {("GET", "/healthz")} == contract_keys
+    assert ("GET", "/platform/diagnostics") in route_keys
+    ops_routes = {("GET", "/healthz"), ("GET", "/platform/diagnostics")}
+    assert route_keys - ops_routes == contract_keys
 
 
 def test_create_product_fastapi_app_can_bootstrap_default_service(fake_fastapi_module):
